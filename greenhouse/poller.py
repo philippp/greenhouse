@@ -76,7 +76,7 @@ class Epoll(Poll):
     OUTMASK = getattr(select, 'EPOLLOUT', None)
     ERRMASK = getattr(select, 'EPOLLERR', None)
 
-    _POLLER = getattr(select, "epoll")
+    _POLLER = getattr(select, "epoll", None)
 
 class Select(object):
     "a greenhouse poller using the select system call"
