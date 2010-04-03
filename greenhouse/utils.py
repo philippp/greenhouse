@@ -3,6 +3,7 @@ from __future__ import with_statement
 import bisect
 import collections
 import functools
+import sys
 import time
 import weakref
 
@@ -39,7 +40,7 @@ class Event(object):
     mirrors the standard library threading.Event API"""
     def __init__(self):
         self._is_set = False
-        self._timeout_callbacks = collections.defaultdict(list)
+        self._timeout_callbacks = []
         self._waiters = []
         self._active_timeouts = set()
         self._awoken_by_timeout = set()
@@ -67,10 +68,8 @@ class Event(object):
         set() method has been called"""
         self._is_set = False
 
-    def _add_timeout_callback(self, func, for_glet=None):
-        if for_glet is None:
-            for_glet = greenlet.getcurrent()
-        self._timeout_callbacks[for_glet].append(func)
+    def _add_timeout_callback(self, func):
+        self._timeout_callbacks.append(func)
 
     def wait(self, timeout=None):
         """pause the current coroutine until this event is set
@@ -88,6 +87,7 @@ class Event(object):
             @scheduler.schedule_in(timeout)
             def hit_timeout():
                 if current in self._active_timeouts:
+                    self._active_timeouts.remove(current)
                     self._awoken_by_timeout.add(current)
                     current.switch()
 
@@ -97,16 +97,16 @@ class Event(object):
         if current in self._awoken_by_timeout:
             self._awoken_by_timeout.remove(current)
 
-            error = None
-            for cb in self._timeout_callbacks[current]:
+            klass, exc, tb = None, None, None
+            for cb in self._timeout_callbacks:
                 try:
                     cb()
-                except Exception, exc:
-                    if error is None:
-                        error = exc
+                except Exception:
+                    if klass is None:
+                        klass, exc, tb = sys.exc_info()
 
-            if error is not None:
-                raise error
+            if klass is not None:
+                raise klass, exc, tb
 
 #@_debugger
 class Lock(object):
@@ -272,10 +272,10 @@ class Semaphore(object):
 
     def release(self):
         "release or increment the semaphore"
-        if self._value or not self._waiters:
-            self._value += 1
-        else:
+        if self._waiters:
             state.awoken_from_events.add(self._waiters.popleft())
+        else:
+            self._value += 1
 
     def __enter__(self):
         return self.acquire()
@@ -320,6 +320,13 @@ class Timer(object):
         index = bisect.bisect(tp, (self.waketime, None))
         if tp[index][1].run is self.func:
             tp[index:index + 1] = []
+
+    @classmethod
+    def wrap(cls, secs, args=(), kwargs=None):
+        "a classmethod decorator to immediately turn a function into a timer"
+        def decorator(func):
+            return cls(secs, func, args, kwargs)
+        return decorator
 
 class Local(object):
     """class that represents greenlet-local data

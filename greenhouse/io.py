@@ -10,6 +10,7 @@ try:
 except ImportError: #pragma: no cover
     from StringIO import StringIO
 
+import greenhouse
 from greenhouse import utils
 from greenhouse._state import state
 
@@ -39,7 +40,11 @@ def unmonkeypatch():
 class Socket(object):
     def __init__(self, *args, **kwargs):
         # wrap a basic socket or build our own
-        self._sock = kwargs.pop('fromsock', None) or _socket(*args, **kwargs)
+        sock = kwargs.pop('fromsock', None) or _socket(*args, **kwargs)
+        if hasattr(sock, "_sock"):
+            self._sock = sock._sock
+        else:
+            self._sock = sock
 
         # copy over attributes
         self.family = self._sock.family
@@ -51,8 +56,8 @@ class Socket(object):
         self.setblocking(False)
 
         # create events
-        self._readable = utils.Event()
-        self._writable = utils.Event()
+        self._readable = greenhouse.Event()
+        self._writable = greenhouse.Event()
 
         # make sure these events raise socket.timeout upon timeout
         def timeout_callback():
@@ -119,8 +124,10 @@ class Socket(object):
         return self._sock.bind(*args, **kwargs)
 
     def close(self):
-        self._closed = True
-        return self._sock.close()
+        # as much as this sucks, it's necessary for sufficient stdlib socket
+        # compatibility to make httplib (and by extension urllib, urllib2)
+        # work. the problem is it calls close(), then recv(). WTF
+        pass
 
     def connect(self, address):
         with self._registered('w'):
@@ -158,8 +165,8 @@ class Socket(object):
     def listen(self, backlog):
         return self._sock.listen(backlog)
 
-    def makefile(self, mode='r', bufsize=None):
-        return socket._fileobject(self)
+    def makefile(self, mode='r', bufsize=-1):
+        return socket._fileobject(self, mode, bufsize)
 
     def recv(self, nbytes):
         with self._registered('r'):
@@ -254,8 +261,8 @@ class File(object):
 
             # if we got here, poller.register worked, so set up event-based IO
             self._waiter = "_wait_event"
-            self._readable = utils.Event()
-            self._writable = utils.Event()
+            self._readable = greenhouse.Event()
+            self._writable = greenhouse.Event()
             state.descriptormap[self._fileno].append(weakref.ref(self))
         except IOError:
             self._waiter = "_wait_yield"
@@ -270,10 +277,15 @@ class File(object):
 
         # if write or append mode and the file doesn't exist, create it
         if flags & (os.O_WRONLY | os.O_RDWR) and not os.path.exists(name):
-            os.mknod(name, 0644, stat.S_IFREG)
+            greenhouse.mkfile(name)
 
         # open the file, get a descriptor
-        self._fileno = os.open(name, flags)
+        try:
+            self._fileno = os.open(name, flags)
+        except OSError, exc:
+            # stdlib open() raises IOError if the file doesn't exist, os.open
+            # raises OSError. pfft, whatever.
+            raise IOError(*exc.args)
 
         # try to drive the asyncronous waiting off of the polling interface,
         # but epoll doesn't seem to support filesystem descriptors, so fall

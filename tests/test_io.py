@@ -34,11 +34,7 @@ class MonkeyPatchingTestCase(StateClearingTestCase):
         assert open is _open
         assert file is _file
 
-class EpollSocketTestCase(StateClearingTestCase):
-    def setUp(self):
-        StateClearingTestCase.setUp(self)
-        greenhouse.poller.set(greenhouse.poller.Epoll())
-
+class SocketPollerMixin(object):
     def test_sockets_basic(self):
         with self.socketpair() as (client, handler):
             client.send("howdy")
@@ -60,6 +56,7 @@ class EpollSocketTestCase(StateClearingTestCase):
     def test_recv_with_closed_sock(self):
         with self.socketpair() as (client, handler):
             client.close()
+            client._sock.close()
             self.assertRaises(socket.error, client.recv, 10)
 
     def test_recvfrom(self):
@@ -109,18 +106,9 @@ class EpollSocketTestCase(StateClearingTestCase):
 
     def test_sockopts(self):
         sock = greenhouse.Socket()
-        assert sock.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR) == 0
+        assert not sock.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        assert sock.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR) == 1
-
-    # shutting down the reading end seems to have no effect on stdlib sockets,
-    # so verify that it has no effect on greenhouse.Sockets either
-    def test_shutdown_reading(self):
-        with self.socketpair() as (client, handler):
-            client.shutdown(socket.SHUT_RD)
-
-            handler.send("hello again")
-            assert client.recv(11) == "hello again"
+        assert sock.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR)
 
     def test_shutdown_writing(self):
         with self.socketpair() as (client, handler):
@@ -195,6 +183,7 @@ class EpollSocketTestCase(StateClearingTestCase):
             assert not results
 
             client.close()
+            client._sock.close()
             greenhouse.pause()
             assert results[0] == "this is a test"
 
@@ -245,29 +234,31 @@ class EpollSocketTestCase(StateClearingTestCase):
             assert client.getsockname() == handler.getpeername()
             assert client.getpeername() == handler.getsockname()
 
-class PollSocketTestCase(EpollSocketTestCase):
-    def setUp(self):
-        StateClearingTestCase.setUp(self)
-        greenhouse.poller.set(greenhouse.poller.Poll())
+if greenhouse.poller.Epoll._POLLER:
+    class EpollSocketTestCase(SocketPollerMixin, StateClearingTestCase):
+        def setUp(self):
+            StateClearingTestCase.setUp(self)
+            greenhouse.poller.set(greenhouse.poller.Epoll())
 
-class SelectSocketTestCase(EpollSocketTestCase):
+if greenhouse.poller.Poll._POLLER:
+    class PollSocketTestCase(SocketPollerMixin, StateClearingTestCase):
+        def setUp(self):
+            StateClearingTestCase.setUp(self)
+            greenhouse.poller.set(greenhouse.poller.Poll())
+
+class SelectSocketTestCase(SocketPollerMixin, StateClearingTestCase):
     def setUp(self):
         StateClearingTestCase.setUp(self)
         greenhouse.poller.set(greenhouse.poller.Select())
 
-class FileWithEpollTestCase(StateClearingTestCase):
-    def setUp(self):
-        StateClearingTestCase.setUp(self)
-        self.fname = tempfile.mktemp()
-        greenhouse.poller.set(greenhouse.poller.Epoll())
-
+class FilePollerMixin(object):
     def tearDown(self):
-        super(FileWithEpollTestCase, self).tearDown()
+        super(FilePollerMixin, self).tearDown()
         if os.path.exists(self.fname):
             os.unlink(self.fname)
 
     def touch(self, path):
-        os.mknod(path, 0644, stat.S_IFREG)
+        greenhouse.mkfile(path)
 
     def test_basic_io(self):
         fp = greenhouse.File(self.fname, 'w')
@@ -281,7 +272,7 @@ class FileWithEpollTestCase(StateClearingTestCase):
         assert text == "this is testing text"
 
     def test_fails_to_read_missing_file(self):
-        self.assertRaises(OSError, greenhouse.File, self.fname, 'r')
+        self.assertRaises(IOError, greenhouse.File, self.fname, 'r')
 
     def test_fromfd(self):
         self.touch(self.fname)
@@ -417,23 +408,27 @@ test""")
         with open(self.fname) as fp:
             assert fp.read() == "".join(lines)
 
-class FileWithPollTestCase(FileWithEpollTestCase):
-    def setUp(self):
-        StateClearingTestCase.setUp(self)
-        self.fname = tempfile.mktemp()
-        greenhouse.poller.set(greenhouse.poller.Poll())
+if greenhouse.poller.Epoll._POLLER:
+    class FileWithEpollTestCase(FilePollerMixin, StateClearingTestCase):
+        def setUp(self):
+            StateClearingTestCase.setUp(self)
+            self.fname = tempfile.mktemp()
+            greenhouse.poller.set(greenhouse.poller.Epoll())
 
-class FileWithSelectTestCase(FileWithEpollTestCase):
+if greenhouse.poller.Poll._POLLER:
+    class FileWithPollTestCase(FilePollerMixin, StateClearingTestCase):
+        def setUp(self):
+            StateClearingTestCase.setUp(self)
+            self.fname = tempfile.mktemp()
+            greenhouse.poller.set(greenhouse.poller.Poll())
+
+class FileWithSelectTestCase(FilePollerMixin, StateClearingTestCase):
     def setUp(self):
         StateClearingTestCase.setUp(self)
         self.fname = tempfile.mktemp()
         greenhouse.poller.set(greenhouse.poller.Select())
 
-class PipeWithEpollTestCase(StateClearingTestCase):
-    def setUp(self):
-        StateClearingTestCase.setUp(self)
-        greenhouse.poller.set(greenhouse.poller.Select())
-
+class PipePollerMixin(object):
     def test_basic(self):
         rfp, wfp = greenhouse.pipe()
         try:
@@ -463,12 +458,19 @@ class PipeWithEpollTestCase(StateClearingTestCase):
             rfp.close()
             wfp.close()
 
-class PipeWithPollTestCase(PipeWithEpollTestCase):
-    def setUp(self):
-        StateClearingTestCase.setUp(self)
-        greenhouse.poller.set(greenhouse.poller.Poll())
+if greenhouse.poller.Epoll._POLLER:
+    class PipeWithEpollTestCase(PipePollerMixin, StateClearingTestCase):
+        def setUp(self):
+            StateClearingTestCase.setUp(self)
+            greenhouse.poller.set(greenhouse.poller.Epoll())
 
-class PipeWithSelectTestCase(PipeWithEpollTestCase):
+if greenhouse.poller.Poll._POLLER:
+    class PipeWithPollTestCase(PipePollerMixin, StateClearingTestCase):
+        def setUp(self):
+            StateClearingTestCase.setUp(self)
+            greenhouse.poller.set(greenhouse.poller.Poll())
+
+class PipeWithSelectTestCase(PipePollerMixin, StateClearingTestCase):
     def setUp(self):
         StateClearingTestCase.setUp(self)
         greenhouse.poller.set(greenhouse.poller.Select())
